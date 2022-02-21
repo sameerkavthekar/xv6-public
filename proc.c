@@ -6,8 +6,10 @@
 #include "x86.h"
 #include "proc.h"
 #include "spinlock.h"
+#include "info.h"
 
 struct {
+  int forked_proc, total_scheduled, keyboards_ints, total_traps;
   struct spinlock lock;
   struct proc proc[NPROC];
 } ptable;
@@ -23,6 +25,10 @@ static void wakeup1(void *chan);
 void
 pinit(void)
 {
+  ptable.forked_proc = 0;
+  ptable.total_scheduled = 0;
+  ptable.keyboards_ints = 0;
+  ptable.total_traps = 0;
   initlock(&ptable.lock, "ptable");
 }
 
@@ -214,6 +220,7 @@ fork(void)
 
   acquire(&ptable.lock);
 
+  ptable.forked_proc += 1;
   np->state = RUNNABLE;
 
   release(&ptable.lock);
@@ -342,7 +349,7 @@ scheduler(void)
       c->proc = p;
       switchuvm(p);
       p->state = RUNNING;
-
+      ptable.total_scheduled += 1;
       swtch(&(c->scheduler), p->context);
       switchkvm();
 
@@ -418,7 +425,7 @@ void
 sleep(void *chan, struct spinlock *lk)
 {
   struct proc *p = myproc();
-  
+
   if(p == 0)
     panic("sleep");
 
@@ -531,4 +538,51 @@ procdump(void)
     }
     cprintf("\n");
   }
+}
+
+int
+info(struct proc_info *pinfo)
+{
+  int runnable = 0;
+  int sleeping = 0;
+  int zombie = 0;
+  struct proc *p;
+
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+    if(p->state == RUNNABLE)
+      runnable++;
+    else if(p->state == SLEEPING)
+      sleeping++;
+    else if(p->state == ZOMBIE)
+      zombie++;
+  }
+  pinfo->zombie = zombie;
+  pinfo->forked = ptable.forked_proc;
+  pinfo->keyboard = ptable.keyboards_ints;
+  pinfo->runnable = runnable;
+  pinfo->scheduled = ptable.total_scheduled;
+  pinfo->traps = ptable.total_traps;
+  pinfo->sleeping = sleeping;
+
+  release(&ptable.lock);
+  return 22;
+}
+
+void 
+increment_keyboard()
+{
+  acquire(&ptable.lock);
+  ptable.keyboards_ints += 1;
+  release(&ptable.lock);
+  return;
+}
+
+void 
+increment_total()
+{
+  acquire(&ptable.lock);
+  ptable.total_traps += 1;
+  release(&ptable.lock);
+  return;
 }

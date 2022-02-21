@@ -1,0 +1,311 @@
+diff --git a/Makefile b/Makefile
+index 09d790c..d1401e0 100644
+--- a/Makefile
++++ b/Makefile
+@@ -76,7 +76,7 @@ AS = $(TOOLPREFIX)gas
+ LD = $(TOOLPREFIX)ld
+ OBJCOPY = $(TOOLPREFIX)objcopy
+ OBJDUMP = $(TOOLPREFIX)objdump
+-CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -Werror -fno-omit-frame-pointer
++CFLAGS = -fno-pic -static -fno-builtin -fno-strict-aliasing -O2 -Wall -MD -ggdb -m32 -fno-omit-frame-pointer
+ CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+ ASFLAGS = -m32 -gdwarf-2 -Wa,-divide
+ # FreeBSD ld wants ``elf_i386_fbsd''
+@@ -181,6 +181,7 @@ UPROGS=\
+ 	_usertests\
+ 	_wc\
+ 	_zombie\
++	_newsyscall\
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -249,7 +250,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+ 
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+-	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
++	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c info.c zombie.c\
+ 	printf.c umalloc.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+diff --git a/defs.h b/defs.h
+index 82fb982..834748e 100644
+--- a/defs.h
++++ b/defs.h
+@@ -4,6 +4,7 @@ struct file;
+ struct inode;
+ struct pipe;
+ struct proc;
++struct proc_info;
+ struct rtcdate;
+ struct spinlock;
+ struct sleeplock;
+@@ -120,6 +121,7 @@ void            userinit(void);
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
++int             info(struct proc_info*);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+diff --git a/info.h b/info.h
+new file mode 100644
+index 0000000..32af42d
+--- /dev/null
++++ b/info.h
+@@ -0,0 +1,4 @@
++struct proc_info 
++{
++	int forked, runnable, sleeping, zombie, scheduled, keyboard, traps;
++};
+\ No newline at end of file
+diff --git a/newsyscall.c b/newsyscall.c
+new file mode 100644
+index 0000000..bf8bdd3
+--- /dev/null
++++ b/newsyscall.c
+@@ -0,0 +1,22 @@
++#include "types.h"
++#include "stat.h"
++#include "user.h"
++#include "info.h"
++
++int
++main(int args, char *argv[])
++{
++	struct proc_info p;
++	p.forked = p.keyboard = p.runnable = p.scheduled = p.sleeping = p.traps = p.zombie = 0;
++	int res = info(&p);
++	if(res < 0)
++		printf(1, "Failed\n");
++
++	printf(1, "ZOMBIE      %d\n", p.zombie);
++	printf(1, "RUNNABLE      %d\n", p.runnable);
++	printf(1, "SLEEPING      %d\n", p.sleeping);
++	printf(1, "TOTAL FORKS      %d\n", p.forked);
++	printf(1, "TOTAL TRAPS      %d\n", p.traps);
++	printf(1, "KEYBOARD INTERRUPTS      %d\n", p.keyboard);
++	printf(1, "TOTAL SCHEDULED      %d\n", p.scheduled);
++}
+\ No newline at end of file
+diff --git a/proc.c b/proc.c
+index 806b1b1..c02731b 100644
+--- a/proc.c
++++ b/proc.c
+@@ -6,8 +6,10 @@
+ #include "x86.h"
+ #include "proc.h"
+ #include "spinlock.h"
++#include "info.h"
+ 
+ struct {
++  int forked_proc, total_scheduled, keyboards_ints, total_traps;
+   struct spinlock lock;
+   struct proc proc[NPROC];
+ } ptable;
+@@ -23,6 +25,10 @@ static void wakeup1(void *chan);
+ void
+ pinit(void)
+ {
++  ptable.forked_proc = 0;
++  ptable.total_scheduled = 0;
++  ptable.keyboards_ints = 0;
++  ptable.total_traps = 0;
+   initlock(&ptable.lock, "ptable");
+ }
+ 
+@@ -214,6 +220,7 @@ fork(void)
+ 
+   acquire(&ptable.lock);
+ 
++  ptable.forked_proc += 1;
+   np->state = RUNNABLE;
+ 
+   release(&ptable.lock);
+@@ -342,7 +349,7 @@ scheduler(void)
+       c->proc = p;
+       switchuvm(p);
+       p->state = RUNNING;
+-
++      ptable.total_scheduled += 1;
+       swtch(&(c->scheduler), p->context);
+       switchkvm();
+ 
+@@ -418,7 +425,7 @@ void
+ sleep(void *chan, struct spinlock *lk)
+ {
+   struct proc *p = myproc();
+-  
++
+   if(p == 0)
+     panic("sleep");
+ 
+@@ -532,3 +539,50 @@ procdump(void)
+     cprintf("\n");
+   }
+ }
++
++int
++info(struct proc_info *pinfo)
++{
++  int runnable = 0;
++  int sleeping = 0;
++  int zombie = 0;
++  struct proc *p;
++
++  acquire(&ptable.lock);
++  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
++    if(p->state == RUNNABLE)
++      runnable++;
++    else if(p->state == SLEEPING)
++      sleeping++;
++    else if(p->state == ZOMBIE)
++      zombie++;
++  }
++  pinfo->zombie = zombie;
++  pinfo->forked = ptable.forked_proc;
++  pinfo->keyboard = ptable.keyboards_ints;
++  pinfo->runnable = runnable;
++  pinfo->scheduled = ptable.total_scheduled;
++  pinfo->traps = ptable.total_traps;
++  pinfo->sleeping = sleeping;
++
++  release(&ptable.lock);
++  return 22;
++}
++
++void 
++increment_keyboard()
++{
++  acquire(&ptable.lock);
++  ptable.keyboards_ints += 1;
++  release(&ptable.lock);
++  return;
++}
++
++void 
++increment_total()
++{
++  acquire(&ptable.lock);
++  ptable.total_traps += 1;
++  release(&ptable.lock);
++  return;
++}
+\ No newline at end of file
+diff --git a/proc.h b/proc.h
+index 1647114..c5eebed 100644
+--- a/proc.h
++++ b/proc.h
+@@ -56,3 +56,6 @@ struct proc {
+ //   original data and bss
+ //   fixed-size stack
+ //   expandable heap
++
++void increment_keyboard();
++void increment_total();
+\ No newline at end of file
+diff --git a/syscall.c b/syscall.c
+index ee85261..e06dc00 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,7 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_info(void);
+ 
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +127,7 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_info]    sys_info,
+ };
+ 
+ void
+diff --git a/syscall.h b/syscall.h
+index bc5f356..9373a42 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,3 +20,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_info   22
+\ No newline at end of file
+diff --git a/sysproc.c b/sysproc.c
+index 0686d29..36a6a15 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -6,6 +6,7 @@
+ #include "memlayout.h"
+ #include "mmu.h"
+ #include "proc.h"
++#include "info.h"
+ 
+ int
+ sys_fork(void)
+@@ -89,3 +90,12 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
++
++int
++sys_info(void)
++{
++	struct proc_info *p;
++	if(argptr(0, (void*)&p, sizeof(*p)) < 0)
++		return -1;
++	return info(p);
++}
+\ No newline at end of file
+diff --git a/trap.c b/trap.c
+index 41c66eb..2bd1d21 100644
+--- a/trap.c
++++ b/trap.c
+@@ -36,6 +36,7 @@ idtinit(void)
+ void
+ trap(struct trapframe *tf)
+ {
++	increment_total();
+   if(tf->trapno == T_SYSCALL){
+     if(myproc()->killed)
+       exit();
+@@ -64,6 +65,7 @@ trap(struct trapframe *tf)
+     // Bochs generates spurious IDE1 interrupts.
+     break;
+   case T_IRQ0 + IRQ_KBD:
++		increment_keyboard();
+     kbdintr();
+     lapiceoi();
+     break;
+diff --git a/user.h b/user.h
+index 4f99c52..d1e7977 100644
+--- a/user.h
++++ b/user.h
+@@ -1,5 +1,6 @@
+ struct stat;
+ struct rtcdate;
++struct proc_info;
+ 
+ // system calls
+ int fork(void);
+@@ -23,6 +24,7 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int info(struct proc_info*);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/usys.S b/usys.S
+index 8bfd8a1..a2b3a1b 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,3 +29,4 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(info)
+\ No newline at end of file

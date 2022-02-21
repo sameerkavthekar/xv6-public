@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "mmu.h"
 #include "proc.h"
+#include "info.h"
 
 int
 sys_fork(void)
@@ -88,4 +89,13 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+int
+sys_info(void)
+{
+	struct proc_info *p;
+	if(argptr(0, (void*)&p, sizeof(*p)) < 0)
+		return -1;
+	return info(p);
 }
