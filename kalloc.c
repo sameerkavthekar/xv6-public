@@ -17,10 +17,11 @@ struct run {
   struct run *next;
 };
 
+struct run* bins[5];
+int hash(char *v) {return (int)((unsigned long)v % 5);}
 struct {
   struct spinlock lock;
   int use_lock;
-  struct run *freelist;
 } kmem;
 
 // Initialization happens in two phases.
@@ -33,6 +34,9 @@ kinit1(void *vstart, void *vend)
 {
   initlock(&kmem.lock, "kmem");
   kmem.use_lock = 0;
+  for(int i = 0; i < 4; i++) {
+    bins[i] = 0;
+  }
   freerange(vstart, vend);
 }
 
@@ -70,8 +74,10 @@ kfree(char *v)
   if(kmem.use_lock)
     acquire(&kmem.lock);
   r = (struct run*)v;
-  r->next = kmem.freelist;
-  kmem.freelist = r;
+  char *q = (char *)r;
+  int index = hash(q);
+  r->next = bins[index];
+  bins[index] = r;
   if(kmem.use_lock)
     release(&kmem.lock);
 }
@@ -83,14 +89,19 @@ char*
 kalloc(void)
 {
   struct run *r;
-
+  int index;
   if(kmem.use_lock)
     acquire(&kmem.lock);
-  r = kmem.freelist;
+
+  for(index = 0; index < 5; index++) 
+    if(bins[index] != 0)
+      break;
+
+  r = bins[index];
   if(r)
-    kmem.freelist = r->next;
+    bins[index] = r->next;
+
   if(kmem.use_lock)
     release(&kmem.lock);
   return (char*)r;
 }
-
