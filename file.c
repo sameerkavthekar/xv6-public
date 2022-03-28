@@ -10,16 +10,57 @@
 #include "sleeplock.h"
 #include "file.h"
 
+#define FILESIZE sizeof(struct file)
+#define PGSIZE    4096
+
+struct next_file {
+  struct next_file *next;
+};
+
 struct devsw devsw[NDEV];
 struct {
   struct spinlock lock;
-  struct file file[NFILE];
+  char *cache;
 } ftable;
+
+void
+cache_init(char *cache)
+{
+  memset(cache, 0, PGSIZE);
+  ((struct next_file *)cache)->next = 0;
+  return;
+}
+
+struct file*
+get_file(char *cache)
+{
+  while(cache != 0) {
+    char *file_start = cache + sizeof(struct next_file);
+    for(char *p = file_start; p + FILESIZE < cache + PGSIZE; p += FILESIZE) {
+      struct file *f = (struct file *)p;
+      if(f->ref == 0){
+        f->ref = 1;
+        return f;
+      }
+    }
+    cache = (char *)((struct next_file *)cache)->next;
+  }
+
+  char *new_cache = kalloc();
+  if(new_cache == 0)
+    return 0;
+  
+  cache_init(new_cache);
+  ((struct next_file *)cache)->next = (struct next_file *)new_cache;
+  return get_file(new_cache);
+}
 
 void
 fileinit(void)
 {
   initlock(&ftable.lock, "ftable");
+  ftable.cache = kalloc();
+  cache_init(ftable.cache);
 }
 
 // Allocate a file structure.
@@ -29,15 +70,12 @@ filealloc(void)
   struct file *f;
 
   acquire(&ftable.lock);
-  for(f = ftable.file; f < ftable.file + NFILE; f++){
-    if(f->ref == 0){
-      f->ref = 1;
-      release(&ftable.lock);
-      return f;
-    }
-  }
+  f = get_file(ftable.cache);
   release(&ftable.lock);
-  return 0;
+  if(f != 0)
+    return f;
+  else
+    panic("out of kernel memory");
 }
 
 // Increment ref count for file f.
